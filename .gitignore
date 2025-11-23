@@ -1,0 +1,4 @@
+extracted/
+*.pkg
+*.pkg_manifest
+hades2suss

@@ -1,0 +1,329 @@
+package bc7
+
+import (
+	"encoding/binary"
+	"errors"
+	"image"
+	"image/color"
+)
+
+// DecodeBC7 decodes BC7 compressed texture data to an RGBA image
+// BC7 uses 4x4 pixel blocks, each block is 16 bytes (128 bits)
+func DecodeBC7(data []byte, width, height int32) (image.Image, error) {
+	img := image.NewRGBA(image.Rect(0, 0, int(width), int(height)))
+
+	// Calculate number of blocks
+	blocksX := (width + 3) / 4
+	blocksY := (height + 3) / 4
+
+	blockIndex := 0
+	for by := int32(0); by < blocksY; by++ {
+		for bx := int32(0); bx < blocksX; bx++ {
+			// Each block is 16 bytes
+			blockStart := blockIndex * 16
+			if blockStart+16 > len(data) {
+				return img, nil // End of data
+			}
+
+			block := data[blockStart : blockStart+16]
+
+			// Decode the block
+			pixels := decodeBC7Block(block)
+
+			// Copy pixels to image
+			for py := 0; py < 4; py++ {
+				for px := 0; px < 4; px++ {
+					x := int(bx)*4 + px
+					y := int(by)*4 + py
+
+					if x < int(width) && y < int(height) {
+						pixelIndex := py*4 + px
+						img.Set(x, y, pixels[pixelIndex])
+					}
+				}
+			}
+
+			blockIndex++
+		}
+	}
+
+	return img, nil
+}
+
+// decodeBC7Block decodes a single 4x4 BC7 block
+func decodeBC7Block(block []byte) [16]color.RGBA {
+	var pixels [16]color.RGBA
+
+	// Read block as uint64s for bit manipulation
+	low := binary.LittleEndian.Uint64(block[0:8])
+	high := binary.LittleEndian.Uint64(block[8:16])
+
+	// Determine mode from first bits
+	mode := determineMode(low)
+
+	switch mode {
+	case 0:
+		pixels = decodeMode0(low, high)
+	case 1:
+		pixels = decodeMode1(low, high)
+	case 2:
+		pixels = decodeMode2(low, high)
+	case 3:
+		pixels = decodeMode3(low, high)
+	case 4:
+		pixels = decodeMode4(low, high)
+	case 5:
+		pixels = decodeMode5(low, high)
+	case 6:
+		pixels = decodeMode6(low, high)
+	case 7:
+		pixels = decodeMode7(low, high)
+	default:
+		// Unknown mode, return magenta for debugging
+		for i := range pixels {
+			pixels[i] = color.RGBA{255, 0, 255, 255}
+		}
+	}
+
+	return pixels
+}
+
+// determineMode determines the BC7 mode from the mode bits
+func determineMode(low uint64) int {
+	for mode := 0; mode < 8; mode++ {
+		if (low & (1 << mode)) != 0 {
+			return mode
+		}
+	}
+	return -1
+}
+
+// Mode implementations
+// Note: These are simplified implementations. Full BC7 decoding is very complex.
+// For production use, consider using a tested library or implementing full spec.
+
+func decodeMode0(low, high uint64) [16]color.RGBA {
+	// Mode 0: 3 subsets, 4-bit endpoints, 3-bit indices
+	return decodeSimpleMode(low, high, 1, 4) // Skip mode bits
+}
+
+func decodeMode1(low, high uint64) [16]color.RGBA {
+	// Mode 1: 2 subsets, 6-bit endpoints, 3-bit indices
+	return decodeSimpleMode(low, high, 2, 6)
+}
+
+func decodeMode2(low, high uint64) [16]color.RGBA {
+	// Mode 2: 3 subsets, 5-bit endpoints, 2-bit indices
+	return decodeSimpleMode(low, high, 3, 5)
+}
+
+func decodeMode3(low, high uint64) [16]color.RGBA {
+	// Mode 3: 2 subsets, 7-bit endpoints, 2-bit indices
+	return decodeSimpleMode(low, high, 4, 7)
+}
+
+func decodeMode4(low, high uint64) [16]color.RGBA {
+	// Mode 4: 1 subset, separate color/alpha, 5-bit color, 6-bit alpha
+	return decodeMode4Impl(low, high)
+}
+
+func decodeMode5(low, high uint64) [16]color.RGBA {
+	// Mode 5: 1 subset, separate color/alpha, 7-bit color, 8-bit alpha
+	return decodeMode5Impl(low, high)
+}
+
+func decodeMode6(low, high uint64) [16]color.RGBA {
+	// Mode 6: 1 subset, 7777.1 endpoints (7 bits RGB, 1 bit Alpha)
+	return decodeMode6Impl(low, high)
+}
+
+func decodeMode7(low, high uint64) [16]color.RGBA {
+	// Mode 7: 1 subset, 5555 endpoints (5 bits RGBA)
+	return decodeMode7Impl(low, high)
+}
+
+// Simplified mode decoder for modes 0-3
+func decodeSimpleMode(low, high uint64, modeBits, endpointBits int) [16]color.RGBA {
+	var pixels [16]color.RGBA
+
+	// This is a simplified implementation
+	// Extract color endpoints (this is mode-dependent in reality)
+	bitPos := modeBits
+
+	// Read endpoints (simplified - actual BC7 has partition indices, rotation, etc.)
+	r0 := extractBits(low, high, bitPos, endpointBits)
+	bitPos += endpointBits
+	g0 := extractBits(low, high, bitPos, endpointBits)
+	bitPos += endpointBits
+	b0 := extractBits(low, high, bitPos, endpointBits)
+	bitPos += endpointBits
+	a0 := uint64(255) // Full alpha
+
+	r1 := extractBits(low, high, bitPos, endpointBits)
+	bitPos += endpointBits
+	g1 := extractBits(low, high, bitPos, endpointBits)
+	bitPos += endpointBits
+	b1 := extractBits(low, high, bitPos, endpointBits)
+	bitPos += endpointBits
+	a1 := uint64(255)
+
+	// Scale endpoints to 8 bits
+	scale := 255 / ((1 << endpointBits) - 1)
+	c0 := color.RGBA{uint8(r0 * uint64(scale)), uint8(g0 * uint64(scale)), uint8(b0 * uint64(scale)), uint8(a0)}
+	c1 := color.RGBA{uint8(r1 * uint64(scale)), uint8(g1 * uint64(scale)), uint8(b1 * uint64(scale)), uint8(a1)}
+
+	// Interpolate all pixels (simplified - should use index bits)
+	for i := 0; i < 16; i++ {
+		// Simple interpolation
+		t := uint8(i * 255 / 15)
+		pixels[i] = interpolateColor(c0, c1, t)
+	}
+
+	return pixels
+}
+
+// Mode 4 implementation (separate color and alpha)
+func decodeMode4Impl(low, high uint64) [16]color.RGBA {
+	// Mode 4: 1 subset, 5-bit color endpoints, 6-bit alpha endpoints, 2/3-bit indices
+	var pixels [16]color.RGBA
+
+	// Extract endpoints
+	r0 := extractBits(low, high, 5, 5)
+	g0 := extractBits(low, high, 10, 5)
+	b0 := extractBits(low, high, 15, 5)
+	r1 := extractBits(low, high, 20, 5)
+	g1 := extractBits(low, high, 25, 5)
+	b1 := extractBits(low, high, 30, 5)
+
+	a0 := extractBits(low, high, 35, 6)
+	a1 := extractBits(low, high, 41, 6)
+
+	// Scale to 8 bits
+	c0 := color.RGBA{uint8(r0 << 3), uint8(g0 << 3), uint8(b0 << 3), uint8(a0 << 2)}
+	c1 := color.RGBA{uint8(r1 << 3), uint8(g1 << 3), uint8(b1 << 3), uint8(a1 << 2)}
+
+	// Decode indices and interpolate (simplified)
+	for i := 0; i < 16; i++ {
+		t := uint8(i * 255 / 15)
+		pixels[i] = interpolateColor(c0, c1, t)
+	}
+
+	return pixels
+}
+
+// Mode 5 implementation
+func decodeMode5Impl(low, high uint64) [16]color.RGBA {
+	var pixels [16]color.RGBA
+
+	// Extract 7-bit color endpoints
+	r0 := extractBits(low, high, 7, 7)
+	g0 := extractBits(low, high, 14, 7)
+	b0 := extractBits(low, high, 21, 7)
+	r1 := extractBits(low, high, 28, 7)
+	g1 := extractBits(low, high, 35, 7)
+	b1 := extractBits(low, high, 42, 7)
+
+	a0 := extractBits(low, high, 49, 8)
+	a1 := extractBits(low, high, 57, 8)
+
+	// Scale to 8 bits
+	c0 := color.RGBA{uint8(r0 << 1), uint8(g0 << 1), uint8(b0 << 1), uint8(a0)}
+	c1 := color.RGBA{uint8(r1 << 1), uint8(g1 << 1), uint8(b1 << 1), uint8(a1)}
+
+	// Interpolate
+	for i := 0; i < 16; i++ {
+		t := uint8(i * 255 / 15)
+		pixels[i] = interpolateColor(c0, c1, t)
+	}
+
+	return pixels
+}
+
+// Mode 6 implementation
+func decodeMode6Impl(low, high uint64) [16]color.RGBA {
+	var pixels [16]color.RGBA
+
+	// Extract 7-bit RGB, 1-bit alpha
+	r0 := extractBits(low, high, 7, 7)
+	g0 := extractBits(low, high, 14, 7)
+	b0 := extractBits(low, high, 21, 7)
+	a0 := extractBits(low, high, 28, 1)
+	r1 := extractBits(low, high, 29, 7)
+	g1 := extractBits(low, high, 36, 7)
+	b1 := extractBits(low, high, 43, 7)
+	a1 := extractBits(low, high, 50, 1)
+
+	c0 := color.RGBA{uint8(r0 << 1), uint8(g0 << 1), uint8(b0 << 1), uint8(a0 * 255)}
+	c1 := color.RGBA{uint8(r1 << 1), uint8(g1 << 1), uint8(b1 << 1), uint8(a1 * 255)}
+
+	for i := 0; i < 16; i++ {
+		t := uint8(i * 255 / 15)
+		pixels[i] = interpolateColor(c0, c1, t)
+	}
+
+	return pixels
+}
+
+// Mode 7 implementation
+func decodeMode7Impl(low, high uint64) [16]color.RGBA {
+	var pixels [16]color.RGBA
+
+	// Extract 5-bit RGBA endpoints
+	r0 := extractBits(low, high, 8, 5)
+	g0 := extractBits(low, high, 13, 5)
+	b0 := extractBits(low, high, 18, 5)
+	a0 := extractBits(low, high, 23, 5)
+	r1 := extractBits(low, high, 28, 5)
+	g1 := extractBits(low, high, 33, 5)
+	b1 := extractBits(low, high, 38, 5)
+	a1 := extractBits(low, high, 43, 5)
+
+	c0 := color.RGBA{uint8(r0 << 3), uint8(g0 << 3), uint8(b0 << 3), uint8(a0 << 3)}
+	c1 := color.RGBA{uint8(r1 << 3), uint8(g1 << 3), uint8(b1 << 3), uint8(a1 << 3)}
+
+	for i := 0; i < 16; i++ {
+		t := uint8(i * 255 / 15)
+		pixels[i] = interpolateColor(c0, c1, t)
+	}
+
+	return pixels
+}
+
+// Helper functions
+
+func extractBits(low, high uint64, start, count int) uint64 {
+	if start < 64 {
+		if start+count <= 64 {
+			// All bits in low
+			return (low >> start) & ((1 << count) - 1)
+		} else {
+			// Bits span low and high
+			bitsFromLow := 64 - start
+			bitsFromHigh := count - bitsFromLow
+			lowPart := (low >> start)
+			highPart := (high & ((1 << bitsFromHigh) - 1)) << bitsFromLow
+			return lowPart | highPart
+		}
+	} else {
+		// All bits in high
+		return (high >> (start - 64)) & ((1 << count) - 1)
+	}
+}
+
+func interpolateColor(c0, c1 color.RGBA, t uint8) color.RGBA {
+	invT := 255 - t
+	return color.RGBA{
+		R: uint8((uint16(c0.R)*uint16(invT) + uint16(c1.R)*uint16(t)) / 255),
+		G: uint8((uint16(c0.G)*uint16(invT) + uint16(c1.G)*uint16(t)) / 255),
+		B: uint8((uint16(c0.B)*uint16(invT) + uint16(c1.B)*uint16(t)) / 255),
+		A: uint8((uint16(c0.A)*uint16(invT) + uint16(c1.A)*uint16(t)) / 255),
+	}
+}
+
+// EncodeBC7 encodes an RGBA image to BC7 compressed data
+func EncodeBC7(img image.Image) ([]byte, error) {
+	// BC7 encoding is very complex and computationally expensive
+	// For now, return an error indicating it's not implemented
+	// In production, you would use a library like DirectXTex or similar
+	return nil, errors.New("BC7 encoding not yet implemented - use DDS files instead")
+}
